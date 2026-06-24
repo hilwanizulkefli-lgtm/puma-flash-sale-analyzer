@@ -3,45 +3,29 @@ PUMA Flash Sale ("Shocking Sale") Product Analyzer
 ---------------------------------------------------
 Joins 4 source files and produces:
   1. Style-level summary — which styles qualify and why
-  2. EAN-level detail   — one row per EAN with flash price calculated
+  2. EAN-level detail   — one row per EAN with flash price & flash stock
 
-Flash price logic:
-  - If SRP (Special/Sale Price) exists and > 0: Flash Price = SRP × (1 - markdown%)
-  - If SRP = 0 or missing:                      Flash Price = RRP × (1 - markdown%)
-
-5 qualifying rules (all configurable in sidebar):
-  ① Warehouse stock ≥ threshold
-  ② No cut sizes (S/M/L/XL etc.)
-  ③ Remark = "Open for all"
-  ④ Flash price must be at least X% lower than the base price (SRP or RRP)
-  ⑤ Marketplace stock ≥ Y% of warehouse stock
+Qualifying rules (all configurable in sidebar):
+  ① Marketplace     — Lazada / Shopee / TikTok (single select)
+  ② Country         — MY / PH / SG (single select, reads correct zeCOM sheet)
+  ③ Price tier      — RRP or SRP as flash base price (user picks)
+  ④ Price markdown  — % to apply to chosen price tier
+  ⑤ No cut sizes    — style must have ≥ N sizes with main WH stock > 0
+  ⑥ Remark          — must equal required value (default: "Open for all")
+  ⑦ Flash stock     — % of each EAN's main WH stock (floor)
 """
 
 from collections import Counter
-
 import pandas as pd
 import streamlit as st
 
-# --------------------------------------------------------------------------
-# Page config
-# --------------------------------------------------------------------------
-st.set_page_config(
-    page_title="⚡ Flash Sale Analyzer",
-    page_icon="⚡",
-    layout="wide",
-)
-
-CUT_SIZES = {
-    "XS", "S", "M", "L", "XL", "XXL", "XXXL", "XXXS",
-    "2XL", "3XL", "4XL", "5XL", "6XL",
-}
+st.set_page_config(page_title="⚡ Flash Sale Analyzer", page_icon="⚡", layout="wide")
 
 
 # --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
 def find_col(columns, candidates):
-    """Return the first column whose name contains any candidate substring."""
     cols_lower = {c: str(c).lower() for c in columns}
     for cand in candidates:
         for col, low in cols_lower.items():
@@ -60,29 +44,31 @@ def to_str_id(value):
 
 def to_number(value, default=0.0):
     try:
-        if pd.isna(value):
-            return default
-        return float(value)
+        return default if pd.isna(value) else float(value)
     except (TypeError, ValueError):
         return default
 
 
-def round2(v):
+def r2(v):
     return round(float(v), 2) if v else 0.0
 
 
 # --------------------------------------------------------------------------
 # File readers
 # --------------------------------------------------------------------------
-def read_zecom_tracker(file, sheet_name=None):
+def read_zecom_tracker(file, country="MY"):
     """
-    zeCOM tracker — multi-row header with merged cells.
-    Remark columns (containing 'Open for all') sit under section-label
-    rows labelled 'EXCLUSION' one row above the real column header row,
-    so they appear as 'Unnamed: N' — we find them via the section row.
+    Reads zeCOM tracker for the selected country sheet (MY / PH / SG).
+    Header row detected by finding 'Style#'. Remark columns found via
+    the section-label row above (labelled 'EXCLUSION' in merged cells).
+    Also reads RRP and MD Price for price tier selection.
     """
-    xls = pd.ExcelFile(file)
-    sheet = sheet_name or xls.sheet_names[0]
+    xls   = pd.ExcelFile(file)
+    sheet = next(
+        (s for s in xls.sheet_names if country.upper() in s.upper()),
+        xls.sheet_names[0]
+    )
+
     raw = pd.read_excel(xls, sheet_name=sheet, header=None)
 
     header_row_idx = None
@@ -109,6 +95,7 @@ def read_zecom_tracker(file, sheet_name=None):
     gender_col  = find_col(df.columns, ["gender"])
     article_col = find_col(df.columns, ["article type", "article_type"])
     rrp_col     = find_col(df.columns, ["rrp"])
+    md_col      = find_col(df.columns, ["md price", "md_price", "markdown price"])
     lazada_col  = find_col(df.columns, ["lazada"])
     shopee_col  = find_col(df.columns, ["shopee"])
     tiktok_col  = find_col(df.columns, ["tiktok", "tik tok"])
@@ -120,15 +107,16 @@ def read_zecom_tracker(file, sheet_name=None):
     )
 
     out = pd.DataFrame()
-    out["style"]       = df[style_col].apply(to_str_id) if style_col else ""
-    out["description"] = df[desc_col].astype(str) if desc_col else ""
-    out["rbu"]         = df[rbu_col].astype(str) if rbu_col else ""
-    out["gender"]      = df[gender_col].astype(str) if gender_col else ""
-    out["article_type"]= df[article_col].astype(str) if article_col else ""
-    out["rrp"]         = df[rrp_col].apply(to_number) if rrp_col else 0.0
-    out["lazada_flag"] = df[lazada_col].astype(str).str.upper().str.strip() if lazada_col else ""
-    out["shopee_flag"] = df[shopee_col].astype(str).str.upper().str.strip() if shopee_col else ""
-    out["tiktok_flag"] = df[tiktok_col].astype(str).str.upper().str.strip() if tiktok_col else ""
+    out["style"]        = df[style_col].apply(to_str_id) if style_col else ""
+    out["description"]  = df[desc_col].astype(str)       if desc_col  else ""
+    out["rbu"]          = df[rbu_col].astype(str)         if rbu_col   else ""
+    out["gender"]       = df[gender_col].astype(str)      if gender_col else ""
+    out["article_type"] = df[article_col].astype(str)     if article_col else ""
+    out["rrp"]          = df[rrp_col].apply(to_number)    if rrp_col   else 0.0
+    out["md_price"]     = df[md_col].apply(to_number)     if md_col    else 0.0
+    out["lazada_flag"]  = df[lazada_col].astype(str).str.upper().str.strip() if lazada_col else ""
+    out["shopee_flag"]  = df[shopee_col].astype(str).str.upper().str.strip() if shopee_col else ""
+    out["tiktok_flag"]  = df[tiktok_col].astype(str).str.upper().str.strip() if tiktok_col else ""
 
     if remark_cols:
         out["remark"] = df[remark_cols].apply(
@@ -139,18 +127,12 @@ def read_zecom_tracker(file, sheet_name=None):
     else:
         out["remark"] = ""
 
-    return out[out["style"] != ""].reset_index(drop=True)
+    return out[out["style"] != ""].reset_index(drop=True), sheet
 
 
-def read_content_file(file, sheet_name=None):
-    """
-    Content/master file: Style → EAN + size mapping.
-    Uses 'Print Size Code (UK)' for cut-size detection (not 'Size No.'
-    which is a generic internal numeric code shared by all product types).
-    """
-    xls = pd.ExcelFile(file)
-    sheet = sheet_name or xls.sheet_names[0]
-    df = pd.read_excel(xls, sheet_name=sheet)
+def read_content_file(file):
+    xls   = pd.ExcelFile(file)
+    df    = pd.read_excel(xls, sheet_name=xls.sheet_names[0])
     df.columns = [str(c).strip() for c in df.columns]
 
     style_col = find_col(df.columns, ["color_no", "color no", "colorno", "style"])
@@ -161,17 +143,15 @@ def read_content_file(file, sheet_name=None):
 
     out = pd.DataFrame()
     out["style"] = df[style_col].apply(to_str_id) if style_col else ""
-    out["ean"]   = df[ean_col].apply(to_str_id) if ean_col else ""
+    out["ean"]   = df[ean_col].apply(to_str_id)   if ean_col   else ""
     out["size"]  = df[size_col].astype(str).str.strip().str.upper() if size_col else ""
 
     return out[(out["style"] != "") & (out["ean"] != "")].reset_index(drop=True)
 
 
-def read_inventory_file(file, sheet_name=None):
-    """Warehouse B2C inventory — sum QtyAvailable per EAN."""
-    xls = pd.ExcelFile(file)
-    sheet = sheet_name or xls.sheet_names[0]
-    df = pd.read_excel(xls, sheet_name=sheet)
+def read_inventory_file(file):
+    xls   = pd.ExcelFile(file)
+    df    = pd.read_excel(xls, sheet_name=xls.sheet_names[0])
     df.columns = [str(c).strip() for c in df.columns]
 
     ean_col = find_col(df.columns, ["sku", "ean"])
@@ -184,15 +164,14 @@ def read_inventory_file(file, sheet_name=None):
     return out.groupby("ean", as_index=False)["wh_qty"].sum()
 
 
-def read_marketplace_price_stock(file, sheet_name=None):
+def read_marketplace_file(file):
     """
-    Lazada/Shopee/TikTok price+stock export.
-    Skips the 3 instruction rows below the real header row in Lazada's
-    bulk-edit template by filtering to pure 8-14 digit EAN barcodes.
-    Returns SRP = SpecialPrice (the current promotional/sale price).
+    Reads Lazada/Shopee/TikTok price+stock export.
+    Lazada template has 3 instruction rows below the header — filtered
+    out by requiring pure 8–14 digit EAN barcodes.
     """
-    xls = pd.ExcelFile(file)
-    sheet = sheet_name or xls.sheet_names[0]
+    xls   = pd.ExcelFile(file)
+    sheet = xls.sheet_names[0]
 
     raw = pd.read_excel(xls, sheet_name=sheet, header=None, nrows=10)
     header_row_idx = 0
@@ -211,188 +190,238 @@ def read_marketplace_price_stock(file, sheet_name=None):
     special_col = find_col(df.columns, ["specialprice", "special price", "promo price", "saleprice"])
 
     out = pd.DataFrame()
-    out["ean"]     = df[ean_col].apply(to_str_id) if ean_col else ""
-    out["mp_qty"]  = df[qty_col].apply(to_number) if qty_col else 0.0
-    out["mp_price"]= df[price_col].apply(to_number) if price_col else 0.0
-    out["srp"]     = df[special_col].apply(to_number) if special_col else 0.0
+    out["ean"]      = df[ean_col].apply(to_str_id)   if ean_col     else ""
+    out["mp_qty"]   = df[qty_col].apply(to_number)   if qty_col     else 0.0
+    out["mp_price"] = df[price_col].apply(to_number) if price_col   else 0.0
+    out["srp"]      = df[special_col].apply(to_number) if special_col else 0.0
 
-    # Keep only real EAN barcodes (8–14 digits, no hyphens or text)
     out = out[out["ean"] != ""]
     out = out[out["ean"].str.fullmatch(r"\d{8,14}")]
-
     return out.groupby("ean", as_index=False).agg(
         {"mp_qty": "sum", "mp_price": "first", "srp": "first"}
     )
 
 
 # --------------------------------------------------------------------------
-# Flash price calculation (per EAN)
+# Flash price calculation
 # --------------------------------------------------------------------------
-def calc_flash_price(srp, rrp, markdown_pct):
+def calc_flash_price(base_price, markdown_pct, rrp):
     """
-    Flash Price rule:
-      - If SRP > 0: flash = SRP × (1 - markdown_pct/100)
-      - If SRP = 0: flash = RRP × (1 - markdown_pct/100)
-    Returns (base_price_used, flash_price, actual_discount_pct_vs_rrp)
+    Flash Price = base_price × (1 − markdown_pct / 100)
+    Also returns discount % vs RRP for reference.
     """
-    factor = 1 - markdown_pct / 100
-    if srp and srp > 0:
-        base = srp
-    elif rrp and rrp > 0:
-        base = rrp
-    else:
-        return 0.0, 0.0, 0.0
-
-    flash = round2(base * factor)
+    if not base_price or base_price <= 0:
+        return 0.0, 0.0
+    flash       = r2(base_price * (1 - markdown_pct / 100))
     disc_vs_rrp = round((rrp - flash) / rrp * 100, 1) if rrp else 0.0
-    return base, flash, disc_vs_rrp
+    return flash, disc_vs_rrp
 
 
 # --------------------------------------------------------------------------
-# Core analysis — returns (style_df, ean_df)
+# Core analysis
 # --------------------------------------------------------------------------
 def run_analysis(
     zecom_df, content_df, inventory_df, marketplace_df,
-    stock_threshold, markdown_pct, min_flash_stock_pct, required_remark,
+    marketplace, price_tier, markdown_pct,
+    min_sizes_with_stock, required_remark, flash_stock_pct,
 ):
-    style_eans  = content_df.groupby("style")["ean"].apply(list).to_dict()
-    style_sizes = content_df.groupby("style")["size"].apply(list).to_dict()
-    ean_size    = content_df.set_index("ean")["size"].to_dict()
+    flag_col_map = {
+        "Lazada": "lazada_flag",
+        "Shopee": "shopee_flag",
+        "TikTok": "tiktok_flag",
+    }
+    flag_col = flag_col_map[marketplace]
 
+    style_eans = content_df.groupby("style")["ean"].apply(list).to_dict()
+    ean_size   = content_df.set_index("ean")["size"].to_dict()
     inv_lookup = inventory_df.set_index("ean")["wh_qty"].to_dict()
     mp_lookup  = marketplace_df.set_index("ean")[
         ["mp_qty", "mp_price", "srp"]
     ].to_dict("index")
 
-    style_rows = []
-    ean_rows   = []
+    style_rows, ean_rows = [], []
 
     for _, prod in zecom_df.iterrows():
-        style  = prod["style"]
-        rrp    = prod["rrp"] or 0.0
+        style = prod["style"]
+        rrp   = prod["rrp"]      or 0.0
+        md    = prod["md_price"] or 0.0
+
         eans   = style_eans.get(style, [])
-        sizes  = style_sizes.get(style, [])
+        ean_wh = {e: inv_lookup.get(e, 0.0) for e in eans}
+        wh_total = sum(ean_wh.values())
 
-        wh_stock  = sum(inv_lookup.get(e, 0) for e in eans)
-        mp_records= [mp_lookup[e] for e in eans if e in mp_lookup]
-        mp_stock  = sum(r["mp_qty"] for r in mp_records)
+        # ① Marketplace flag check
+        on_platform = prod[flag_col] == "YES"
 
-        has_cut_size = any(s in CUT_SIZES for s in sizes)
-        remark       = str(prod["remark"]).strip()
-        remark_ok    = remark.lower() == required_remark.lower()
-        min_flash_st = round(wh_stock * (min_flash_stock_pct / 100))
+        # ③ Resolve base price from chosen price tier
+        if price_tier == "RRP":
+            base_price = rrp
+        else:  # SRP — take from marketplace file, fall back to RRP
+            base_price = next(
+                (mp_lookup[e]["srp"] for e in eans
+                 if e in mp_lookup and mp_lookup[e]["srp"]),
+                0.0
+            ) or rrp
 
-        platforms = []
-        if prod["lazada_flag"] == "YES": platforms.append("Lazada")
-        if prod["shopee_flag"] == "YES": platforms.append("Shopee")
-        if prod["tiktok_flag"] == "YES": platforms.append("TikTok")
+        # ⑤ Cut-size rule: count sizes with main WH stock > 0
+        sizes_with_stock = sum(1 for e in eans if ean_wh[e] > 0)
+        has_cut_size     = (len(eans) > 0) and (sizes_with_stock < min_sizes_with_stock)
 
-        # Style-level fails (rules ①②③⑤)
-        style_fails = []
-        if wh_stock < stock_threshold:
-            style_fails.append(f"WH stock {int(wh_stock)} < {stock_threshold}")
-        elif wh_stock == 0:
-            style_fails.append("No warehouse stock")
+        # ⑦ Flash stock
+        total_flash_stock = sum(int(ean_wh[e] * flash_stock_pct / 100) for e in eans)
+        mp_records        = [mp_lookup[e] for e in eans if e in mp_lookup]
+        mp_stock_total    = sum(r["mp_qty"] for r in mp_records)
+
+        # ⑥ Remark
+        remark    = str(prod["remark"]).strip()
+        remark_ok = remark.lower() == required_remark.lower()
+
+        # ④ Flash price
+        flash_price, disc_vs_rrp = calc_flash_price(base_price, markdown_pct, rrp)
+        price_ok = flash_price > 0
+
+        # Collect fails
+        fails = []
+        if not on_platform:
+            fails.append(f"Not listed on {marketplace}")
         if has_cut_size:
-            style_fails.append("Has cut sizes")
-        if not remark_ok:
-            style_fails.append(f"Remark: '{remark or '(empty)'}'")
-        if wh_stock > 0 and mp_stock < min_flash_st:
-            style_fails.append(
-                f"Marketplace stock {int(mp_stock)} < {min_flash_stock_pct:.0f}% "
-                f"of WH (need ≥{min_flash_st})"
+            fails.append(
+                f"Cut sizes — {sizes_with_stock} size(s) with stock "
+                f"(need ≥ {min_sizes_with_stock})"
             )
-
-        # Representative price for style summary (first EAN with data)
-        rep = next((mp_lookup[e] for e in eans if e in mp_lookup), {})
-        rep_srp  = rep.get("srp", 0.0) or 0.0
-        _, rep_flash, rep_disc = calc_flash_price(rep_srp, rrp, markdown_pct)
+        if not remark_ok:
+            fails.append(f"Remark: '{remark or '(empty)'}'")
+        if not price_ok:
+            fails.append(f"{price_tier} missing/zero — cannot calculate flash price")
+        if wh_total > 0 and mp_stock_total < total_flash_stock:
+            fails.append(
+                f"Platform stock {int(mp_stock_total)} < flash stock needed "
+                f"({int(total_flash_stock)})"
+            )
+        if wh_total == 0:
+            fails.append("No main WH stock")
 
         style_rows.append({
-            "Style":            style,
-            "Description":      prod["description"],
-            "RBU":              prod["rbu"],
-            "Gender":           prod["gender"],
-            "Article Type":     prod["article_type"],
-            "Platforms":        ", ".join(platforms) or "—",
-            "RRP":              round2(rrp),
-            "SRP":              round2(rep_srp),
-            "Flash Price":      rep_flash,
-            "Disc % vs RRP":    rep_disc,
-            "WH Stock":         int(wh_stock),
-            "Marketplace Stock":int(mp_stock),
-            "Min Flash Stock":  int(min_flash_st),
-            "Remark":           remark,
-            "Qualifies":        len(style_fails) == 0,
-            "Fail Reasons":     "; ".join(style_fails) if style_fails else "",
+            "Style":                       style,
+            "Description":                 prod["description"],
+            "RBU":                         prod["rbu"],
+            "Gender":                      prod["gender"],
+            "Article Type":                prod["article_type"],
+            "Marketplace":                 marketplace,
+            "RRP":                         r2(rrp),
+            "MD Price":                    r2(md),
+            "Price Tier Used":             price_tier,
+            "Base Price":                  r2(base_price),
+            "Flash Price":                 flash_price,
+            "Disc % vs RRP":               disc_vs_rrp,
+            "Sizes with Stock":            sizes_with_stock,
+            "Main WH Stock":               int(wh_total),
+            "Total Flash Stock to Submit": int(total_flash_stock),
+            "Remark":                      remark,
+            "Qualifies":                   len(fails) == 0,
+            "Fail Reasons":                "; ".join(fails) if fails else "",
         })
 
-        # EAN-level rows — only for qualifying styles
-        if len(style_fails) == 0:
+        # EAN-level rows — qualifying styles only
+        if len(fails) == 0:
             for ean in eans:
-                mp  = mp_lookup.get(ean, {})
-                srp = mp.get("srp", 0.0) or 0.0
-                qty = mp.get("mp_qty", 0.0)
-                wh  = inv_lookup.get(ean, 0.0)
-                base, flash, disc = calc_flash_price(srp, rrp, markdown_pct)
-                size = ean_size.get(ean, "")
-
-                flash_stock = int(wh * (min_flash_stock_pct / 100))  # always round down
+                mp       = mp_lookup.get(ean, {})
+                srp      = mp.get("srp", 0.0) or 0.0
+                wh       = ean_wh[ean]
+                size     = ean_size.get(ean, "")
+                ean_base = srp if (price_tier == "SRP" and srp > 0) else rrp
+                f_price, f_disc = calc_flash_price(ean_base, markdown_pct, rrp)
+                flash_stock = int(wh * flash_stock_pct / 100)
 
                 ean_rows.append({
-                    "Style":             style,
-                    "Description":       prod["description"],
-                    "RBU":               prod["rbu"],
-                    "Gender":            prod["gender"],
-                    "EAN":               ean,
-                    "Size":              size,
-                    "Platforms":         ", ".join(platforms) or "—",
-                    "RRP":               round2(rrp),
-                    "SRP":               round2(srp),
-                    "Base Price Used":   round2(base),
-                    "Flash Price":       flash,
-                    "Disc % vs RRP":     disc,
-                    "WH Stock":          int(wh),
-                    "Flash Stock (20%)": flash_stock,
-                    "Marketplace Stock": int(qty),
+                    "Style":                 style,
+                    "Description":           prod["description"],
+                    "RBU":                   prod["rbu"],
+                    "Gender":                prod["gender"],
+                    "EAN":                   ean,
+                    "Size":                  size,
+                    "Marketplace":           marketplace,
+                    "RRP":                   r2(rrp),
+                    "MD Price":              r2(md),
+                    "SRP":                   r2(srp),
+                    "Price Tier Used":       price_tier,
+                    "Base Price":            r2(ean_base),
+                    "Flash Price":           f_price,
+                    "Disc % vs RRP":         f_disc,
+                    "Main WH Stock":         int(wh),
+                    "Flash Stock to Submit": flash_stock,
                 })
 
     return pd.DataFrame(style_rows), pd.DataFrame(ean_rows)
 
 
 # --------------------------------------------------------------------------
-# Sidebar — rules
+# Sidebar — configuration
 # --------------------------------------------------------------------------
-st.sidebar.title("⚡ Shocking Sale Rules")
-st.sidebar.caption("All 5 rules must pass for a style to qualify.")
+st.sidebar.title("⚡ Flash Sale Rules")
+st.sidebar.caption("Configure all rules, then upload files and click Analyze.")
 
-st.sidebar.markdown("**① Warehouse stock**")
-stock_threshold = st.sidebar.number_input(
-    "Minimum warehouse stock (units)", min_value=0, value=50, step=10,
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 🌏 Eligibility")
+
+st.sidebar.markdown("**① Marketplace**")
+marketplace = st.sidebar.selectbox(
+    "Marketplace", ["Lazada", "Shopee", "TikTok"],
     label_visibility="collapsed"
 )
 
-st.sidebar.markdown("**② No cut sizes** — always checked (S/M/L/XL etc.)")
-
-st.sidebar.markdown("**③ Remark**")
-required_remark = st.sidebar.text_input(
-    "Required remark value", value="Open for all",
+st.sidebar.markdown("**② Country**")
+country = st.sidebar.selectbox(
+    "Country", ["MY", "PH", "SG"],
     label_visibility="collapsed"
 )
 
-st.sidebar.markdown("**④ Flash price markdown %**")
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 💰 Price")
+
+st.sidebar.markdown("**③ Price tier (flash base price)**")
 st.sidebar.caption(
-    "Flash price = SRP × (1 − this %) if SRP > 0, else RRP × (1 − this %)"
+    "RRP = full tag price (from zeCOM). "
+    "SRP = current sale price (from marketplace export)."
 )
+price_tier = st.sidebar.selectbox(
+    "Price tier", ["RRP", "SRP"],
+    label_visibility="collapsed"
+)
+
+st.sidebar.markdown("**④ Price markdown %**")
+st.sidebar.caption(f"Flash Price = {price_tier} × (1 − this %)")
 markdown_pct = st.sidebar.number_input(
-    "Price markdown % to apply", min_value=0.0, max_value=100.0,
+    "Markdown %", min_value=0.0, max_value=100.0,
     value=1.0, step=0.5, label_visibility="collapsed"
 )
 
-st.sidebar.markdown("**⑤ Marketplace stock**")
-min_flash_stock_pct = st.sidebar.number_input(
-    "Min marketplace stock as % of WH stock", min_value=0.0,
-    value=20.0, step=5.0, label_visibility="collapsed"
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 📦 Stock")
+
+st.sidebar.markdown("**⑤ Flash stock % of main WH stock**")
+st.sidebar.caption("Flash Stock to Submit = floor(EAN main WH stock × this %)")
+flash_stock_pct = st.sidebar.number_input(
+    "Flash stock %", min_value=0.0, value=20.0, step=5.0,
+    label_visibility="collapsed"
+)
+
+st.sidebar.markdown("**⑥ Min sizes with stock (cut-size rule)**")
+st.sidebar.caption(
+    "Fail if fewer than this many sizes have main WH stock > 0."
+)
+min_sizes_with_stock = st.sidebar.number_input(
+    "Min sizes with stock", min_value=1, value=3, step=1,
+    label_visibility="collapsed"
+)
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 🏷️ Remark")
+
+st.sidebar.markdown("**⑦ Required remark value**")
+required_remark = st.sidebar.text_input(
+    "Required remark", value="Open for all",
+    label_visibility="collapsed"
 )
 
 st.sidebar.divider()
@@ -400,57 +429,96 @@ st.sidebar.caption("PUMA MY / PH / SG flash sale qualifier")
 
 
 # --------------------------------------------------------------------------
-# Main — header
+# Main panel
 # --------------------------------------------------------------------------
 st.title("⚡ Flash Sale Product Analyzer")
 st.caption(
-    "Upload your 4 source files. The app joins them, applies your 5 rules, "
-    "and outputs a full EAN-level list with calculated flash prices."
+    "Configure rules in the sidebar → upload 4 files → click **Analyze** "
+    "to get your qualifying EAN list with flash prices and flash stock."
 )
 
-# --------------------------------------------------------------------------
-# File upload
-# --------------------------------------------------------------------------
+# Active config summary banner
+with st.expander("📋 Active configuration — click to expand", expanded=True):
+    a1, a2, a3, a4 = st.columns(4)
+    a1.metric("Marketplace",   marketplace)
+    a2.metric("Country",       country)
+    a3.metric("Price tier",    price_tier)
+    a4.metric("Markdown",      f"{markdown_pct}%")
+    b1, b2, b3, b4 = st.columns(4)
+    b1.metric("Flash stock",   f"{flash_stock_pct:.0f}% of WH")
+    b2.metric("Min sizes",     f"≥ {min_sizes_with_stock} with stock")
+    b3.metric("Remark",        required_remark)
+    b4.metric("zeCOM sheet",   f"'{country}' tab")
+
+st.divider()
+
 col1, col2 = st.columns(2)
 with col1:
-    zecom_file     = st.file_uploader("1️⃣ zeCOM Tracker (.xlsx)", type=["xlsx","xls"], key="zecom")
-    content_file   = st.file_uploader("2️⃣ Content / Master file (.xlsx)", type=["xlsx","xls"], key="content")
+    zecom_file     = st.file_uploader(
+        f"1️⃣ zeCOM Tracker (.xlsx) — '{country}' sheet will be read",
+        type=["xlsx","xls"], key="zecom"
+    )
+    content_file   = st.file_uploader(
+        "2️⃣ Content / Master file (.xlsx)",
+        type=["xlsx","xls"], key="content"
+    )
 with col2:
-    inventory_file = st.file_uploader("3️⃣ Warehouse Inventory (.xlsx)", type=["xlsx","xls"], key="inv")
-    marketplace_file = st.file_uploader("4️⃣ Marketplace Price/Stock export (.xlsx)", type=["xlsx","xls"], key="mp")
+    inventory_file = st.file_uploader(
+        "3️⃣ Warehouse Inventory (.xlsx)",
+        type=["xlsx","xls"], key="inv"
+    )
+    marketplace_file = st.file_uploader(
+        f"4️⃣ {marketplace} Price/Stock export (.xlsx)",
+        type=["xlsx","xls"], key="mp"
+    )
 
 all_uploaded = all([zecom_file, content_file, inventory_file, marketplace_file])
-
 if not all_uploaded:
     st.info("Upload all 4 files to enable analysis.")
 
-run_btn = st.button("🔍 Analyze products", type="primary", disabled=not all_uploaded)
+run_btn = st.button(
+    f"🔍 Analyze — {marketplace} · {country} · {price_tier} base",
+    type="primary", disabled=not all_uploaded
+)
+
 
 # --------------------------------------------------------------------------
 # Run
 # --------------------------------------------------------------------------
 if run_btn:
-    with st.spinner("Reading and joining all 4 files…"):
+    with st.spinner(f"Reading & joining files — {country} · {marketplace} · {price_tier}…"):
         try:
-            zecom_df       = read_zecom_tracker(zecom_file)
-            content_df     = read_content_file(content_file)
-            inventory_df   = read_inventory_file(inventory_file)
-            marketplace_df = read_marketplace_price_stock(marketplace_file)
+            zecom_df, sheet_used = read_zecom_tracker(zecom_file, country)
+            content_df           = read_content_file(content_file)
+            inventory_df         = read_inventory_file(inventory_file)
+            marketplace_df       = read_marketplace_file(marketplace_file)
         except Exception as e:
             st.error(f"Error reading files: {e}")
             st.stop()
 
         if zecom_df.empty:
-            st.error("Could not find 'Style#' column in zeCOM tracker. Check file format.")
+            st.error(
+                f"Could not find a '{country}' sheet in the zeCOM tracker. "
+                "Check that the sheet name contains 'MY', 'PH', or 'SG'."
+            )
             st.stop()
+
+        st.success(f"✅ Read zeCOM sheet: **{sheet_used}** — {len(zecom_df):,} styles loaded")
 
         style_df, ean_df = run_analysis(
             zecom_df, content_df, inventory_df, marketplace_df,
-            stock_threshold, markdown_pct, min_flash_stock_pct, required_remark,
+            marketplace, price_tier, markdown_pct,
+            min_sizes_with_stock, required_remark, flash_stock_pct,
         )
 
     st.session_state["style_df"] = style_df
     st.session_state["ean_df"]   = ean_df
+    st.session_state["cfg"]      = {
+        "marketplace": marketplace, "country": country,
+        "price_tier": price_tier, "markdown_pct": markdown_pct,
+        "flash_stock_pct": flash_stock_pct,
+    }
+
 
 # --------------------------------------------------------------------------
 # Display
@@ -458,43 +526,52 @@ if run_btn:
 if "style_df" in st.session_state:
     style_df = st.session_state["style_df"]
     ean_df   = st.session_state["ean_df"]
+    cfg      = st.session_state.get("cfg", {})
 
-    total   = len(style_df)
-    passed  = int(style_df["Qualifies"].sum())
-    failed  = total - passed
-    rate    = round(passed / total * 100, 1) if total else 0
+    total  = len(style_df)
+    passed = int(style_df["Qualifies"].sum())
+    failed = total - passed
+    rate   = round(passed / total * 100, 1) if total else 0
+    fsp    = cfg.get("flash_stock_pct", 20)
 
     st.divider()
+    st.markdown(
+        f"### Results — **{cfg.get('marketplace','')}** · **{cfg.get('country','')}** · "
+        f"**{cfg.get('price_tier','')}** base · **{cfg.get('markdown_pct','')}%** markdown"
+    )
 
-    # Metrics
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Total styles",   f"{total:,}")
-    c2.metric("Qualify ✓",      passed)
-    c3.metric("Disqualified",   f"{failed:,}")
-    c4.metric("Pass rate",      f"{rate}%")
-    c5.metric("Qualifying EANs",f"{len(ean_df):,}")
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Total styles",    f"{total:,}")
+    m2.metric("Qualify ✓",       passed)
+    m3.metric("Disqualified",    f"{failed:,}")
+    m4.metric("Pass rate",       f"{rate}%")
+    m5.metric("Qualifying EANs", f"{len(ean_df):,}")
 
-    # Fail reason chart
+    # Fail reason breakdown chart
     fail_counter = Counter()
     for reasons in style_df.loc[~style_df["Qualifies"], "Fail Reasons"]:
         for r in reasons.split(";"):
             r = r.strip()
             if not r: continue
-            if r.startswith("WH stock") or r == "No warehouse stock":
-                fail_counter["Low / no warehouse stock"] += 1
-            elif r == "Has cut sizes":
-                fail_counter["Has cut sizes"] += 1
-            elif r.startswith("Remark"):
+            if "not listed" in r.lower():
+                fail_counter[f"Not on {cfg.get('marketplace','')}"] += 1
+            elif "cut sizes" in r.lower():
+                fail_counter["Cut sizes (insufficient size run)"] += 1
+            elif "remark" in r.lower():
                 fail_counter["Remark not matching"] += 1
-            elif r.startswith("Marketplace stock"):
-                fail_counter["Marketplace stock too low"] += 1
+            elif "missing" in r.lower() or "zero" in r.lower():
+                fail_counter["Price missing / zero"] += 1
+            elif "platform stock" in r.lower():
+                fail_counter["Platform stock < flash stock needed"] += 1
+            elif "no main wh" in r.lower():
+                fail_counter["No main WH stock"] += 1
 
     if fail_counter:
         st.subheader("Fail reason breakdown")
         st.bar_chart(
             pd.DataFrame(
                 sorted(fail_counter.items(), key=lambda x: -x[1]),
-                columns=["Reason","Count"]
+                columns=["Reason", "Count"]
             ).set_index("Reason")
         )
 
@@ -506,14 +583,15 @@ if "style_df" in st.session_state:
             .set_index("RBU")
         )
 
-    # ---- TABS: Style summary | EAN detail ----
-    tab1, tab2 = st.tabs(["📦 Style summary", "🏷️ EAN detail (flash price list)"])
+    tab1, tab2 = st.tabs(["📦 Style summary", "🏷️ EAN flash price list"])
 
+    # ── Style summary ──────────────────────────────────────────────────────
     with tab1:
-        st.caption("All styles — filter by status, RBU, or search.")
         f1, f2, f3 = st.columns([1, 1, 2])
         with f1:
-            status_f = st.selectbox("Status", ["All","Qualifies only","Disqualified only"], key="sf1")
+            status_f = st.selectbox(
+                "Status", ["All", "Qualifies only", "Disqualified only"], key="sf1"
+            )
         with f2:
             rbu_opts = ["All"] + sorted(style_df["RBU"].dropna().unique().tolist())
             rbu_f    = st.selectbox("RBU", rbu_opts, key="sf2")
@@ -521,9 +599,9 @@ if "style_df" in st.session_state:
             search_f = st.text_input("Search style / description", key="sf3")
 
         view = style_df.copy()
-        if status_f == "Qualifies only":   view = view[view["Qualifies"]]
-        if status_f == "Disqualified only":view = view[~view["Qualifies"]]
-        if rbu_f != "All":                 view = view[view["RBU"] == rbu_f]
+        if status_f == "Qualifies only":    view = view[view["Qualifies"]]
+        if status_f == "Disqualified only": view = view[~view["Qualifies"]]
+        if rbu_f != "All":                  view = view[view["RBU"] == rbu_f]
         if search_f:
             m = (view["Style"].str.contains(search_f, case=False, na=False) |
                  view["Description"].str.contains(search_f, case=False, na=False))
@@ -532,64 +610,92 @@ if "style_df" in st.session_state:
         st.dataframe(
             view, use_container_width=True, hide_index=True,
             column_config={
-                "Qualifies":    st.column_config.CheckboxColumn("Qualifies"),
-                "RRP":          st.column_config.NumberColumn("RRP",          format="MYR %.2f"),
-                "SRP":          st.column_config.NumberColumn("SRP",          format="MYR %.2f"),
-                "Flash Price":  st.column_config.NumberColumn("Flash Price",  format="MYR %.2f"),
-                "Disc % vs RRP":st.column_config.NumberColumn("Disc % vs RRP",format="%.1f%%"),
+                "Qualifies":       st.column_config.CheckboxColumn("Qualifies"),
+                "RRP":             st.column_config.NumberColumn("RRP",        format="MYR %.2f"),
+                "MD Price":        st.column_config.NumberColumn("MD Price",   format="MYR %.2f"),
+                "Base Price":      st.column_config.NumberColumn("Base Price", format="MYR %.2f"),
+                "Flash Price":     st.column_config.NumberColumn("Flash Price",format="MYR %.2f"),
+                "Disc % vs RRP":   st.column_config.NumberColumn("Disc % vs RRP", format="%.1f%%"),
+                "Total Flash Stock to Submit": st.column_config.NumberColumn(
+                    "Total Flash Stock to Submit",
+                    help=f"Sum of floor({fsp:.0f}% × each EAN's main WH stock)"
+                ),
             }
         )
         st.download_button(
             "⬇️ Download style summary CSV",
             data=view.to_csv(index=False).encode("utf-8"),
-            file_name="flash_sale_style_summary.csv", mime="text/csv", key="dl1"
+            file_name=(
+                f"flash_{cfg.get('marketplace','').lower()}_"
+                f"{cfg.get('country','').lower()}_styles.csv"
+            ),
+            mime="text/csv", key="dl1"
         )
 
+    # ── EAN detail ─────────────────────────────────────────────────────────
     with tab2:
         st.caption(
-            f"**{len(ean_df):,} EANs** from qualifying styles — each row shows the "
-            "calculated flash price. Flash Price = SRP × (1 − markdown%) if SRP > 0, "
-            "else RRP × (1 − markdown%)."
+            f"**{len(ean_df):,} EANs** from qualifying styles. "
+            f"Flash Price = {cfg.get('price_tier','')} × "
+            f"(1 − {cfg.get('markdown_pct','')}%).  "
+            f"Flash Stock to Submit = floor({fsp:.0f}% × main WH stock per EAN)."
         )
 
         e1, e2, e3 = st.columns([1, 1, 2])
         with e1:
-            rbu_opts2 = ["All"] + sorted(ean_df["RBU"].dropna().unique().tolist()) if not ean_df.empty else ["All"]
-            rbu_f2    = st.selectbox("RBU", rbu_opts2, key="ef1")
+            rbu_opts2 = ["All"] + (
+                sorted(ean_df["RBU"].dropna().unique().tolist())
+                if not ean_df.empty else []
+            )
+            rbu_f2 = st.selectbox("RBU", rbu_opts2, key="ef1")
         with e2:
-            plat_opts = ["All","Lazada","Shopee","TikTok"]
-            plat_f    = st.selectbox("Platform", plat_opts, key="ef2")
+            gender_opts = ["All"] + (
+                sorted(ean_df["Gender"].dropna().unique().tolist())
+                if not ean_df.empty else []
+            )
+            gender_f = st.selectbox("Gender", gender_opts, key="ef2")
         with e3:
             search_f2 = st.text_input("Search style / description / EAN", key="ef3")
 
         ean_view = ean_df.copy() if not ean_df.empty else ean_df
         if not ean_view.empty:
-            if rbu_f2 != "All":  ean_view = ean_view[ean_view["RBU"] == rbu_f2]
-            if plat_f != "All":  ean_view = ean_view[ean_view["Platforms"].str.contains(plat_f, na=False)]
+            if rbu_f2 != "All":   ean_view = ean_view[ean_view["RBU"] == rbu_f2]
+            if gender_f != "All": ean_view = ean_view[ean_view["Gender"] == gender_f]
             if search_f2:
-                m2 = (ean_view["Style"].str.contains(search_f2, case=False, na=False) |
-                      ean_view["Description"].str.contains(search_f2, case=False, na=False) |
-                      ean_view["EAN"].str.contains(search_f2, case=False, na=False))
+                m2 = (
+                    ean_view["Style"].str.contains(search_f2, case=False, na=False) |
+                    ean_view["Description"].str.contains(search_f2, case=False, na=False) |
+                    ean_view["EAN"].str.contains(search_f2, case=False, na=False)
+                )
                 ean_view = ean_view[m2]
 
         if ean_view.empty:
-            st.info("No qualifying EANs yet — run the analysis first.")
+            st.info("No qualifying EANs — run the analysis first or adjust your rules.")
         else:
             st.dataframe(
                 ean_view, use_container_width=True, hide_index=True,
                 column_config={
-                    "RRP":               st.column_config.NumberColumn("RRP",               format="MYR %.2f"),
-                    "SRP":               st.column_config.NumberColumn("SRP",               format="MYR %.2f"),
-                    "Base Price Used":   st.column_config.NumberColumn("Base Price Used",   format="MYR %.2f"),
-                    "Flash Price":       st.column_config.NumberColumn("Flash Price",       format="MYR %.2f"),
-                    "Disc % vs RRP":     st.column_config.NumberColumn("Disc % vs RRP",    format="%.1f%%"),
-                    "WH Stock":          st.column_config.NumberColumn("WH Stock"),
-                    "Flash Stock (20%)": st.column_config.NumberColumn("Flash Stock (20%)", help="Floor of 20% of this EAN's warehouse stock"),
-                    "Marketplace Stock": st.column_config.NumberColumn("Marketplace Stock"),
+                    "RRP":                   st.column_config.NumberColumn("RRP",         format="MYR %.2f"),
+                    "MD Price":              st.column_config.NumberColumn("MD Price",    format="MYR %.2f"),
+                    "SRP":                   st.column_config.NumberColumn("SRP",         format="MYR %.2f"),
+                    "Base Price":            st.column_config.NumberColumn("Base Price",  format="MYR %.2f"),
+                    "Flash Price":           st.column_config.NumberColumn("Flash Price", format="MYR %.2f"),
+                    "Disc % vs RRP":         st.column_config.NumberColumn("Disc % vs RRP", format="%.1f%%"),
+                    "Main WH Stock":         st.column_config.NumberColumn(
+                        "Main WH Stock", help="Units in main warehouse only"
+                    ),
+                    "Flash Stock to Submit": st.column_config.NumberColumn(
+                        "Flash Stock to Submit",
+                        help=f"Floor of {fsp:.0f}% of this EAN's main WH stock"
+                    ),
                 }
             )
             st.download_button(
                 "⬇️ Download EAN flash price list CSV",
                 data=ean_view.to_csv(index=False).encode("utf-8"),
-                file_name="flash_sale_ean_list.csv", mime="text/csv", key="dl2"
+                file_name=(
+                    f"flash_{cfg.get('marketplace','').lower()}_"
+                    f"{cfg.get('country','').lower()}_eans.csv"
+                ),
+                mime="text/csv", key="dl2"
             )
