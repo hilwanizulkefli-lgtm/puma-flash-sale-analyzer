@@ -56,13 +56,13 @@ def r2(v):
 # --------------------------------------------------------------------------
 # File readers
 # --------------------------------------------------------------------------
-def read_zecom_tracker(file, country="MY"):
+def read_zecom_tracker(file, country="MY", col_map=None):
     """
     Reads zeCOM tracker for the selected country sheet (MY / PH / SG).
-    Header row detected by finding 'Style#'. Remark columns found via
-    the section-label row above (labelled 'EXCLUSION' in merged cells).
-    Also reads RRP and MD Price for price tier selection.
+    If col_map is provided (dict with keys: style, rrp, srp, remark),
+    those column names are used directly instead of auto-detection.
     """
+    col_map = col_map or {}
     xls   = pd.ExcelFile(file)
     sheet = next(
         (s for s in xls.sheet_names if country.upper() in s.upper()),
@@ -80,6 +80,7 @@ def read_zecom_tracker(file, country="MY"):
     if header_row_idx is None:
         header_row_idx = 3
 
+    # Remark columns via section-label row above header (merged-cell EXCLUSION label)
     section_row = raw.iloc[max(header_row_idx - 1, 0)]
     remark_col_positions = [
         i for i, v in enumerate(section_row)
@@ -89,22 +90,18 @@ def read_zecom_tracker(file, country="MY"):
     df = pd.read_excel(xls, sheet_name=sheet, header=header_row_idx)
     df.columns = [str(c).strip() for c in df.columns]
 
-    style_col   = find_col(df.columns, ["style#", "style #", "style"])
-    desc_col    = find_col(df.columns, ["description", "product name", "name"])
-    rbu_col     = find_col(df.columns, ["rbu"])
-    gender_col  = find_col(df.columns, ["gender"])
-    article_col = find_col(df.columns, ["article type", "article_type"])
-    rrp_col     = find_col(df.columns, ["rrp"])
-    md_col      = find_col(df.columns, ["md price", "md_price", "markdown price"])
+    # Use user-selected columns if provided, else auto-detect
+    style_col   = col_map.get("style")   or find_col(df.columns, ["style#", "style #", "style"])
+    desc_col    = col_map.get("desc")    or find_col(df.columns, ["description", "product name", "name"])
+    rbu_col     = col_map.get("rbu")     or find_col(df.columns, ["rbu"])
+    gender_col  = col_map.get("gender")  or find_col(df.columns, ["gender"])
+    article_col = col_map.get("article") or find_col(df.columns, ["article type", "article_type"])
+    rrp_col     = col_map.get("rrp")     or find_col(df.columns, ["rrp"])
+    md_col      = col_map.get("srp")     or find_col(df.columns, ["md price", "md_price", "markdown price", "srp", "ec srp"])
+    remark_col  = col_map.get("remark")  # user-selected single remark column
     lazada_col  = find_col(df.columns, ["lazada"])
     shopee_col  = find_col(df.columns, ["shopee"])
     tiktok_col  = find_col(df.columns, ["tiktok", "tik tok"])
-
-    named_remark_cols = [c for c in df.columns if "remark" in str(c).lower()]
-    remark_cols = (
-        [df.columns[i] for i in remark_col_positions if i < len(df.columns)]
-        or named_remark_cols
-    )
 
     out = pd.DataFrame()
     out["style"]        = df[style_col].apply(to_str_id) if style_col else ""
@@ -118,16 +115,25 @@ def read_zecom_tracker(file, country="MY"):
     out["shopee_flag"]  = df[shopee_col].astype(str).str.upper().str.strip() if shopee_col else ""
     out["tiktok_flag"]  = df[tiktok_col].astype(str).str.upper().str.strip() if tiktok_col else ""
 
-    if remark_cols:
-        out["remark"] = df[remark_cols].apply(
-            lambda row: next(
-                (str(v).strip() for v in row if pd.notna(v) and str(v).strip()), ""
-            ), axis=1,
-        )
+    # Remark: user-selected column takes priority, then section-label detection, then named search
+    if remark_col and remark_col in df.columns:
+        out["remark"] = df[remark_col].astype(str).str.strip()
     else:
-        out["remark"] = ""
+        named_remark_cols = [c for c in df.columns if "remark" in str(c).lower()]
+        auto_remark_cols  = (
+            [df.columns[i] for i in remark_col_positions if i < len(df.columns)]
+            or named_remark_cols
+        )
+        if auto_remark_cols:
+            out["remark"] = df[auto_remark_cols].apply(
+                lambda row: next(
+                    (str(v).strip() for v in row if pd.notna(v) and str(v).strip()), ""
+                ), axis=1,
+            )
+        else:
+            out["remark"] = ""
 
-    return out[out["style"] != ""].reset_index(drop=True), sheet
+    return out[out["style"] != ""].reset_index(drop=True), sheet, df.columns.tolist()
 
 
 def read_content_file(file):
@@ -433,32 +439,33 @@ st.sidebar.caption("PUMA MY / PH / SG flash sale qualifier")
 # --------------------------------------------------------------------------
 st.title("⚡ Flash Sale Product Analyzer")
 st.caption(
-    "Configure rules in the sidebar → upload 4 files → click **Analyze** "
-    "to get your qualifying EAN list with flash prices and flash stock."
+    "Configure rules in the sidebar → upload 4 files → "
+    "map your zeCOM columns → click **Analyze**."
 )
 
 # Active config summary banner
-with st.expander("📋 Active configuration — click to expand", expanded=True):
+with st.expander("📋 Active configuration", expanded=True):
     a1, a2, a3, a4 = st.columns(4)
-    a1.metric("Marketplace",   marketplace)
-    a2.metric("Country",       country)
-    a3.metric("Price tier",    price_tier)
-    a4.metric("Markdown",      f"{markdown_pct}%")
+    a1.metric("Marketplace", marketplace)
+    a2.metric("Country",     country)
+    a3.metric("Price tier",  price_tier)
+    a4.metric("Markdown",    f"{markdown_pct}%")
     b1, b2, b3, b4 = st.columns(4)
-    b1.metric("Flash stock",   f"{flash_stock_pct:.0f}% of WH")
-    b2.metric("Min sizes",     f"≥ {min_sizes_with_stock} with stock")
-    b3.metric("Remark",        required_remark)
-    b4.metric("zeCOM sheet",   f"'{country}' tab")
+    b1.metric("Flash stock",  f"{flash_stock_pct:.0f}% of WH")
+    b2.metric("Min sizes",    f"≥ {min_sizes_with_stock} with stock")
+    b3.metric("Remark",       required_remark)
+    b4.metric("zeCOM sheet",  f"'{country}' tab")
 
 st.divider()
 
+# ── File upload ────────────────────────────────────────────────────────────
 col1, col2 = st.columns(2)
 with col1:
-    zecom_file     = st.file_uploader(
+    zecom_file = st.file_uploader(
         f"1️⃣ zeCOM Tracker (.xlsx) — '{country}' sheet will be read",
         type=["xlsx","xls"], key="zecom"
     )
-    content_file   = st.file_uploader(
+    content_file = st.file_uploader(
         "2️⃣ Content / Master file (.xlsx)",
         type=["xlsx","xls"], key="content"
     )
@@ -471,6 +478,109 @@ with col2:
         f"4️⃣ {marketplace} Price/Stock export (.xlsx)",
         type=["xlsx","xls"], key="mp"
     )
+
+# ── Column Mapping (only shown when zeCOM file is uploaded) ───────────────
+col_map = {}
+zecom_headers = []
+
+if zecom_file:
+    # Peek at headers so user can pick columns
+    try:
+        _xls   = pd.ExcelFile(zecom_file)
+        _sheet = next(
+            (s for s in _xls.sheet_names if country.upper() in s.upper()),
+            _xls.sheet_names[0]
+        )
+        _raw = pd.read_excel(_xls, sheet_name=_sheet, header=None)
+        _hdr_idx = None
+        for _i in range(min(10, len(_raw))):
+            _row_vals = [str(v).strip().lower() for v in _raw.iloc[_i].tolist()]
+            if any(v in ("style#", "style #", "style") for v in _row_vals):
+                _hdr_idx = _i
+                break
+        if _hdr_idx is None:
+            _hdr_idx = 3
+        _df = pd.read_excel(_xls, sheet_name=_sheet, header=_hdr_idx)
+        _df.columns = [str(c).strip() for c in _df.columns]
+        # Filter to columns that have meaningful names (not Unnamed)
+        zecom_headers = [
+            c for c in _df.columns
+            if c and not str(c).startswith("Unnamed")
+        ]
+        zecom_file.seek(0)  # reset for later full read
+    except Exception:
+        zecom_headers = []
+
+    with st.expander("🗂️ Column Mapping — select which columns to use from your zeCOM file", expanded=True):
+        st.caption(
+            f"Sheet: **{_sheet}** · {len(zecom_headers)} named columns detected. "
+            "Collapsed by default. Changes auto-apply on next Analyze run."
+        )
+
+        _na = "— auto detect —"
+        _opts = [_na] + zecom_headers
+
+        st.markdown(f"**{country} · {marketplace}**")
+
+        cm1, cm2 = st.columns(2)
+        with cm1:
+            style_sel = st.selectbox(
+                "Article / Style# column",
+                _opts,
+                index=_opts.index(
+                    next((c for c in zecom_headers if "style" in c.lower()), _na)
+                ) if any("style" in c.lower() for c in zecom_headers) else 0,
+                key="cm_style"
+            )
+            rrp_sel = st.selectbox(
+                "RRP column",
+                _opts,
+                index=_opts.index(
+                    next((c for c in zecom_headers
+                          if "rrp" in c.lower() and country.lower() in c.lower()), _na)
+                ) if any("rrp" in c.lower() and country.lower() in c.lower()
+                         for c in zecom_headers) else 0,
+                key="cm_rrp"
+            )
+        with cm2:
+            srp_sel = st.selectbox(
+                "SRP / MD Price column",
+                _opts,
+                index=_opts.index(
+                    next((c for c in zecom_headers
+                          if ("srp" in c.lower() or "md price" in c.lower())
+                          and country.lower() in c.lower()), _na)
+                ) if any(("srp" in c.lower() or "md price" in c.lower())
+                         and country.lower() in c.lower()
+                         for c in zecom_headers) else 0,
+                key="cm_srp"
+            )
+            remark_sel = st.selectbox(
+                "Exclusion / Remark column",
+                _opts,
+                index=_opts.index(
+                    next((c for c in zecom_headers
+                          if "rmk" in c.lower() or "remark" in c.lower()
+                          or "exclusion" in c.lower()), _na)
+                ) if any("rmk" in c.lower() or "remark" in c.lower()
+                         or "exclusion" in c.lower()
+                         for c in zecom_headers) else 0,
+                key="cm_remark"
+            )
+
+        col_map = {
+            "style":  style_sel  if style_sel  != _na else None,
+            "rrp":    rrp_sel    if rrp_sel    != _na else None,
+            "srp":    srp_sel    if srp_sel    != _na else None,
+            "remark": remark_sel if remark_sel != _na else None,
+        }
+
+        st.caption(
+            f"✅ Mapped: Style=**{col_map['style'] or 'auto'}** · "
+            f"RRP=**{col_map['rrp'] or 'auto'}** · "
+            f"SRP=**{col_map['srp'] or 'auto'}** · "
+            f"Remark=**{col_map['remark'] or 'auto'}**"
+        )
 
 all_uploaded = all([zecom_file, content_file, inventory_file, marketplace_file])
 if not all_uploaded:
@@ -488,10 +598,10 @@ run_btn = st.button(
 if run_btn:
     with st.spinner(f"Reading & joining files — {country} · {marketplace} · {price_tier}…"):
         try:
-            zecom_df, sheet_used = read_zecom_tracker(zecom_file, country)
-            content_df           = read_content_file(content_file)
-            inventory_df         = read_inventory_file(inventory_file)
-            marketplace_df       = read_marketplace_file(marketplace_file)
+            zecom_df, sheet_used, _ = read_zecom_tracker(zecom_file, country, col_map)
+            content_df              = read_content_file(content_file)
+            inventory_df            = read_inventory_file(inventory_file)
+            marketplace_df          = read_marketplace_file(marketplace_file)
         except Exception as e:
             st.error(f"Error reading files: {e}")
             st.stop()
@@ -503,7 +613,13 @@ if run_btn:
             )
             st.stop()
 
-        st.success(f"✅ Read zeCOM sheet: **{sheet_used}** — {len(zecom_df):,} styles loaded")
+        st.success(
+            f"✅ Sheet: **{sheet_used}** — {len(zecom_df):,} styles · "
+            f"Column mapping: Style={col_map.get('style') or 'auto'}, "
+            f"RRP={col_map.get('rrp') or 'auto'}, "
+            f"SRP={col_map.get('srp') or 'auto'}, "
+            f"Remark={col_map.get('remark') or 'auto'}"
+        )
 
         style_df, ean_df = run_analysis(
             zecom_df, content_df, inventory_df, marketplace_df,
@@ -514,9 +630,12 @@ if run_btn:
     st.session_state["style_df"] = style_df
     st.session_state["ean_df"]   = ean_df
     st.session_state["cfg"]      = {
-        "marketplace": marketplace, "country": country,
-        "price_tier": price_tier, "markdown_pct": markdown_pct,
-        "flash_stock_pct": flash_stock_pct,
+        "marketplace":    marketplace,
+        "country":        country,
+        "price_tier":     price_tier,
+        "markdown_pct":   markdown_pct,
+        "flash_stock_pct":flash_stock_pct,
+        "col_map":        col_map,
     }
 
 
