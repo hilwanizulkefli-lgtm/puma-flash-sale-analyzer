@@ -484,14 +484,14 @@ col_map = {}
 zecom_headers = []
 
 if zecom_file:
-    # Peek at headers so user can pick columns
+    # Peek at ALL columns (including Unnamed) so user can pick by letter
     try:
         _xls   = pd.ExcelFile(zecom_file)
         _sheet = next(
             (s for s in _xls.sheet_names if country.upper() in s.upper()),
             _xls.sheet_names[0]
         )
-        _raw = pd.read_excel(_xls, sheet_name=_sheet, header=None)
+        _raw    = pd.read_excel(_xls, sheet_name=_sheet, header=None)
         _hdr_idx = None
         for _i in range(min(10, len(_raw))):
             _row_vals = [str(v).strip().lower() for v in _raw.iloc[_i].tolist()]
@@ -500,86 +500,94 @@ if zecom_file:
                 break
         if _hdr_idx is None:
             _hdr_idx = 3
+
         _df = pd.read_excel(_xls, sheet_name=_sheet, header=_hdr_idx)
         _df.columns = [str(c).strip() for c in _df.columns]
-        # Filter to columns that have meaningful names (not Unnamed)
-        zecom_headers = [
-            c for c in _df.columns
-            if c and not str(c).startswith("Unnamed")
-        ]
-        zecom_file.seek(0)  # reset for later full read
-    except Exception:
-        zecom_headers = []
 
-    with st.expander("🗂️ Column Mapping — select which columns to use from your zeCOM file", expanded=True):
+        # Build "Col A — BUY", "Col B — OTB Season", ... for every column
+        def _col_letter(n):
+            """Convert 0-based index to Excel column letter (A, B, ..., Z, AA, AB...)."""
+            s = ""
+            n += 1
+            while n:
+                n, r = divmod(n - 1, 26)
+                s = chr(65 + r) + s
+            return s
+
+        _all_cols = _df.columns.tolist()
+        _col_opts = ["— select column —"] + [
+            f"Col {_col_letter(i)} — {name}"
+            for i, name in enumerate(_all_cols)
+        ]
+        # Also keep a mapping from option string back to actual column name
+        _opt_to_col = {
+            f"Col {_col_letter(i)} — {name}": name
+            for i, name in enumerate(_all_cols)
+        }
+
+        zecom_file.seek(0)
+    except Exception as e:
+        _all_cols, _col_opts, _opt_to_col = [], ["— select column —"], {}
+        _sheet = "unknown"
+
+    def _default_idx(keywords):
+        """Find the best matching option index for a list of keyword hints."""
+        for kw in keywords:
+            for i, opt in enumerate(_col_opts):
+                if kw.lower() in opt.lower():
+                    return i
+        return 0
+
+    with st.expander("🗂️ Column Mapping — pick by column letter", expanded=True):
         st.caption(
-            f"Sheet: **{_sheet}** · {len(zecom_headers)} named columns detected. "
-            "Collapsed by default. Changes auto-apply on next Analyze run."
+            f"Sheet: **{_sheet}** · {len(_all_cols)} columns detected. "
+            f"Each option shows the column letter and its header name — "
+            f"e.g. **Col C — Style#**, **Col Z — MY RRP**."
         )
 
-        _na = "— auto detect —"
-        _opts = [_na] + zecom_headers
-
         st.markdown(f"**{country} · {marketplace}**")
-
         cm1, cm2 = st.columns(2)
+
         with cm1:
             style_sel = st.selectbox(
                 "Article / Style# column",
-                _opts,
-                index=_opts.index(
-                    next((c for c in zecom_headers if "style" in c.lower()), _na)
-                ) if any("style" in c.lower() for c in zecom_headers) else 0,
+                _col_opts,
+                index=_default_idx(["style#", "style "]),
                 key="cm_style"
             )
             rrp_sel = st.selectbox(
                 "RRP column",
-                _opts,
-                index=_opts.index(
-                    next((c for c in zecom_headers
-                          if "rrp" in c.lower() and country.lower() in c.lower()), _na)
-                ) if any("rrp" in c.lower() and country.lower() in c.lower()
-                         for c in zecom_headers) else 0,
+                _col_opts,
+                index=_default_idx([f"{country} rrp", "my rrp", "rrp"]),
                 key="cm_rrp"
             )
         with cm2:
             srp_sel = st.selectbox(
                 "SRP / MD Price column",
-                _opts,
-                index=_opts.index(
-                    next((c for c in zecom_headers
-                          if ("srp" in c.lower() or "md price" in c.lower())
-                          and country.lower() in c.lower()), _na)
-                ) if any(("srp" in c.lower() or "md price" in c.lower())
-                         and country.lower() in c.lower()
-                         for c in zecom_headers) else 0,
+                _col_opts,
+                index=_default_idx([
+                    f"{country} ec srp", "ec srp", f"{country} md price", "md price", "srp"
+                ]),
                 key="cm_srp"
             )
             remark_sel = st.selectbox(
                 "Exclusion / Remark column",
-                _opts,
-                index=_opts.index(
-                    next((c for c in zecom_headers
-                          if "rmk" in c.lower() or "remark" in c.lower()
-                          or "exclusion" in c.lower()), _na)
-                ) if any("rmk" in c.lower() or "remark" in c.lower()
-                         or "exclusion" in c.lower()
-                         for c in zecom_headers) else 0,
+                _col_opts,
+                index=_default_idx(["mp promo rmk", "promo rmk", "rmk", "remark", "exclusion"]),
                 key="cm_remark"
             )
 
+        _na = "— select column —"
         col_map = {
-            "style":  style_sel  if style_sel  != _na else None,
-            "rrp":    rrp_sel    if rrp_sel    != _na else None,
-            "srp":    srp_sel    if srp_sel    != _na else None,
-            "remark": remark_sel if remark_sel != _na else None,
+            "style":  _opt_to_col.get(style_sel)  if style_sel  != _na else None,
+            "rrp":    _opt_to_col.get(rrp_sel)    if rrp_sel    != _na else None,
+            "srp":    _opt_to_col.get(srp_sel)    if srp_sel    != _na else None,
+            "remark": _opt_to_col.get(remark_sel) if remark_sel != _na else None,
         }
 
         st.caption(
-            f"✅ Mapped: Style=**{col_map['style'] or 'auto'}** · "
-            f"RRP=**{col_map['rrp'] or 'auto'}** · "
-            f"SRP=**{col_map['srp'] or 'auto'}** · "
-            f"Remark=**{col_map['remark'] or 'auto'}**"
+            f"✅ Mapped: Style=**{style_sel}** · RRP=**{rrp_sel}** · "
+            f"SRP=**{srp_sel}** · Remark=**{remark_sel}**"
         )
 
 all_uploaded = all([zecom_file, content_file, inventory_file, marketplace_file])
