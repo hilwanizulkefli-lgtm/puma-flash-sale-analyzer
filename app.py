@@ -228,7 +228,7 @@ def calc_flash_price(base_price, markdown_pct, rrp):
 # --------------------------------------------------------------------------
 def run_analysis(
     zecom_df, content_df, inventory_df, marketplace_df,
-    marketplace, price_tier, markdown_pct,
+    marketplace, markdown_pct,
     min_sizes_with_stock, required_remark, flash_stock_pct,
 ):
     flag_col_map = {
@@ -259,31 +259,29 @@ def run_analysis(
         # ① Marketplace flag check
         on_platform = prod[flag_col] == "YES"
 
-        # ③ Resolve base price from chosen price tier
-        if price_tier == "RRP":
-            base_price = rrp
-        else:  # SRP — take from marketplace file, fall back to RRP
-            base_price = next(
-                (mp_lookup[e]["srp"] for e in eans
-                 if e in mp_lookup and mp_lookup[e]["srp"]),
-                0.0
-            ) or rrp
+        # ③ Flash price base: SRP if exists and > 0, else RRP (per style — use first EAN with SRP)
+        style_srp = next(
+            (mp_lookup[e]["srp"] for e in eans
+             if e in mp_lookup and mp_lookup[e]["srp"] and mp_lookup[e]["srp"] > 0),
+            0.0
+        )
+        style_base = style_srp if style_srp > 0 else rrp
 
-        # ⑤ Cut-size rule: count sizes with main WH stock > 0
+        # ④ Cut-size rule: count sizes with main WH stock > 0
         sizes_with_stock = sum(1 for e in eans if ean_wh[e] > 0)
         has_cut_size     = (len(eans) > 0) and (sizes_with_stock < min_sizes_with_stock)
 
-        # ⑦ Flash stock
+        # Flash stock totals
         total_flash_stock = sum(int(ean_wh[e] * flash_stock_pct / 100) for e in eans)
         mp_records        = [mp_lookup[e] for e in eans if e in mp_lookup]
         mp_stock_total    = sum(r["mp_qty"] for r in mp_records)
 
-        # ⑥ Remark
+        # ⑤ Remark
         remark    = str(prod["remark"]).strip()
         remark_ok = remark.lower() == required_remark.lower()
 
-        # ④ Flash price
-        flash_price, disc_vs_rrp = calc_flash_price(base_price, markdown_pct, rrp)
+        # Flash price for style summary
+        flash_price, disc_vs_rrp = calc_flash_price(style_base, markdown_pct, rrp)
         price_ok = flash_price > 0
 
         # Collect fails
@@ -298,7 +296,7 @@ def run_analysis(
         if not remark_ok:
             fails.append(f"Remark: '{remark or '(empty)'}'")
         if not price_ok:
-            fails.append(f"{price_tier} missing/zero — cannot calculate flash price")
+            fails.append("RRP and SRP both missing/zero — cannot calculate flash price")
         if wh_total > 0 and mp_stock_total < total_flash_stock:
             fails.append(
                 f"Platform stock {int(mp_stock_total)} < flash stock needed "
@@ -316,8 +314,8 @@ def run_analysis(
             "Marketplace":                 marketplace,
             "RRP":                         r2(rrp),
             "MD Price":                    r2(md),
-            "Price Tier Used":             price_tier,
-            "Base Price":                  r2(base_price),
+            "SRP":                         r2(style_srp),
+            "Base Price Used":             r2(style_base),
             "Flash Price":                 flash_price,
             "Disc % vs RRP":               disc_vs_rrp,
             "Sizes with Stock":            sizes_with_stock,
@@ -331,11 +329,13 @@ def run_analysis(
         # EAN-level rows — qualifying styles only
         if len(fails) == 0:
             for ean in eans:
-                mp       = mp_lookup.get(ean, {})
-                srp      = mp.get("srp", 0.0) or 0.0
-                wh       = ean_wh[ean]
-                size     = ean_size.get(ean, "")
-                ean_base = srp if (price_tier == "SRP" and srp > 0) else rrp
+                mp  = mp_lookup.get(ean, {})
+                srp = mp.get("srp", 0.0) or 0.0
+                wh  = ean_wh[ean]
+                size = ean_size.get(ean, "")
+
+                # Per-EAN: SRP if > 0, else RRP
+                ean_base = srp if srp > 0 else rrp
                 f_price, f_disc = calc_flash_price(ean_base, markdown_pct, rrp)
                 flash_stock = int(wh * flash_stock_pct / 100)
 
@@ -350,8 +350,7 @@ def run_analysis(
                     "RRP":                   r2(rrp),
                     "MD Price":              r2(md),
                     "SRP":                   r2(srp),
-                    "Price Tier Used":       price_tier,
-                    "Base Price":            r2(ean_base),
+                    "Base Price Used":       r2(ean_base),
                     "Flash Price":           f_price,
                     "Disc % vs RRP":         f_disc,
                     "Main WH Stock":         int(wh),
@@ -385,18 +384,11 @@ country = st.sidebar.selectbox(
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 💰 Price")
 
-st.sidebar.markdown("**③ Price tier (flash base price)**")
+st.sidebar.markdown("**③ Price markdown %**")
 st.sidebar.caption(
-    "RRP = full tag price (from zeCOM). "
-    "SRP = current sale price (from marketplace export)."
+    "Flash Price = SRP × (1 − this %) if SRP > 0, "
+    "else RRP × (1 − this %)"
 )
-price_tier = st.sidebar.selectbox(
-    "Price tier", ["RRP", "SRP"],
-    label_visibility="collapsed"
-)
-
-st.sidebar.markdown("**④ Price markdown %**")
-st.sidebar.caption(f"Flash Price = {price_tier} × (1 − this %)")
 markdown_pct = st.sidebar.number_input(
     "Markdown %", min_value=0.0, max_value=100.0,
     value=1.0, step=0.5, label_visibility="collapsed"
@@ -405,14 +397,14 @@ markdown_pct = st.sidebar.number_input(
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 📦 Stock")
 
-st.sidebar.markdown("**⑤ Flash stock % of main WH stock**")
+st.sidebar.markdown("**④ Flash stock % of main WH stock**")
 st.sidebar.caption("Flash Stock to Submit = floor(EAN main WH stock × this %)")
 flash_stock_pct = st.sidebar.number_input(
     "Flash stock %", min_value=0.0, value=20.0, step=5.0,
     label_visibility="collapsed"
 )
 
-st.sidebar.markdown("**⑥ Min sizes with stock (cut-size rule)**")
+st.sidebar.markdown("**⑤ Min sizes with stock (cut-size rule)**")
 st.sidebar.caption(
     "Fail if fewer than this many sizes have main WH stock > 0."
 )
@@ -448,13 +440,12 @@ with st.expander("📋 Active configuration", expanded=True):
     a1, a2, a3, a4 = st.columns(4)
     a1.metric("Marketplace", marketplace)
     a2.metric("Country",     country)
-    a3.metric("Price tier",  price_tier)
-    a4.metric("Markdown",    f"{markdown_pct}%")
-    b1, b2, b3, b4 = st.columns(4)
-    b1.metric("Flash stock",  f"{flash_stock_pct:.0f}% of WH")
-    b2.metric("Min sizes",    f"≥ {min_sizes_with_stock} with stock")
-    b3.metric("Remark",       required_remark)
-    b4.metric("zeCOM sheet",  f"'{country}' tab")
+    a3.metric("Markdown",    f"{markdown_pct}%")
+    a4.metric("Flash stock", f"{flash_stock_pct:.0f}% of WH")
+    b1, b2, b3 = st.columns(3)
+    b1.metric("Min sizes",   f"≥ {min_sizes_with_stock} with stock")
+    b2.metric("Remark",      required_remark)
+    b3.metric("zeCOM sheet", f"'{country}' tab")
 
 st.divider()
 
@@ -595,7 +586,7 @@ if not all_uploaded:
     st.info("Upload all 4 files to enable analysis.")
 
 run_btn = st.button(
-    f"🔍 Analyze — {marketplace} · {country} · {price_tier} base",
+    f"🔍 Analyze — {marketplace} · {country} · {markdown_pct}% markdown",
     type="primary", disabled=not all_uploaded
 )
 
@@ -604,7 +595,7 @@ run_btn = st.button(
 # Run
 # --------------------------------------------------------------------------
 if run_btn:
-    with st.spinner(f"Reading & joining files — {country} · {marketplace} · {price_tier}…"):
+    with st.spinner(f"Reading & joining files — {country} · {marketplace} · {markdown_pct}% markdown…"):
         try:
             zecom_df, sheet_used, _ = read_zecom_tracker(zecom_file, country, col_map)
             content_df              = read_content_file(content_file)
@@ -631,7 +622,7 @@ if run_btn:
 
         style_df, ean_df = run_analysis(
             zecom_df, content_df, inventory_df, marketplace_df,
-            marketplace, price_tier, markdown_pct,
+            marketplace, markdown_pct,
             min_sizes_with_stock, required_remark, flash_stock_pct,
         )
 
@@ -640,7 +631,6 @@ if run_btn:
     st.session_state["cfg"]      = {
         "marketplace":    marketplace,
         "country":        country,
-        "price_tier":     price_tier,
         "markdown_pct":   markdown_pct,
         "flash_stock_pct":flash_stock_pct,
         "col_map":        col_map,
@@ -664,7 +654,7 @@ if "style_df" in st.session_state:
     st.divider()
     st.markdown(
         f"### Results — **{cfg.get('marketplace','')}** · **{cfg.get('country','')}** · "
-        f"**{cfg.get('price_tier','')}** base · **{cfg.get('markdown_pct','')}%** markdown"
+        f"**{cfg.get('markdown_pct','')}%** markdown"
     )
 
     m1, m2, m3, m4, m5 = st.columns(5)
@@ -763,8 +753,8 @@ if "style_df" in st.session_state:
     with tab2:
         st.caption(
             f"**{len(ean_df):,} EANs** from qualifying styles. "
-            f"Flash Price = {cfg.get('price_tier','')} × "
-            f"(1 − {cfg.get('markdown_pct','')}%).  "
+            f"Flash Price = SRP × (1 − {cfg.get('markdown_pct','')}%) if SRP > 0, "
+            f"else RRP × (1 − {cfg.get('markdown_pct','')}%).  "
             f"Flash Stock to Submit = floor({fsp:.0f}% × main WH stock per EAN)."
         )
 
